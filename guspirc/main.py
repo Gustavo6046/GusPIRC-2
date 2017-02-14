@@ -44,11 +44,11 @@ sentientteam.freeforums.org
 #
 # The simple, event-driven, high-level IRC library everyone wants
 MESSAGE_TYPES = {
-	"KICK":			"([^\\!]+)!([^\\@]+)@([^ ]+) KICK (#[^ ]+) ([^ ]+)( :(.*))?",
-	"PRIVMSG":		"([^\\!]+)!([^\\@]+)@([^ ]+) PRIVMSG (#[^ ]+)( :(.+))",
-	"BAN":			"([^\\!]+)!([^\\@]+)@([^ ]+) BAN (#[^ ]+)",
-	"NOTICE":		"([^\\!]+)!([^\\@]+)@([^ ]+) NOTICE ([^ ]+)( :(.+))",
-	"NICK":			"([^\\!]+)!([^\\@]+)@([^ ]+) NICK ([^ ]+)"
+	"KICK":			":([^\\!]+)!([^\\@]+)@([^ ]+) KICK (#[^ ]+) ([^ ]+)( :(.*))?",
+	"PRIVMSG":		":([^\\!]+)!([^\\@]+)@([^ ]+) PRIVMSG (#[^ ]+)( :(.+))",
+	"BAN":			":([^\\!]+)!([^\\@]+)@([^ ]+) BAN (#[^ ]+)",
+	"NOTICE":		":([^\\!]+)!([^\\@]+)@([^ ]+) NOTICE ([^ ]+)( :(.+))",
+	"NICK":			":([^\\!]+)!([^\\@]+)@([^ ]+) NICK ([^ ]+)"
 }
 
 MESSAGES_RECEIVED = []
@@ -69,6 +69,12 @@ class IRCChannel(object):
 		else:
 			self.channel = "#{}".format(channel_name)
 			self.no_pound = channel_name
+
+	def send_message(self, msg):
+		"""
+		Sends this channel a PRIVMSG. Simple.
+		"""
+		self.connection.send_command("PRIVMSG {} :{}".format(self.channel, msg))
 
 class IRCMessage(object):
 	"""An IRC message. A flexible, high-level adaptation of GusBot2's
@@ -91,8 +97,14 @@ class IRCMessage(object):
 
 		else:
 			matches = {a: re.match(b, raw).groups() for a, b in {k: v for k, v in MESSAGE_TYPES.items() if re.match(v, raw)}.items()}
-			self.message_type = matches.keys()[0]
-			self.message_data = matches.values()[0]
+
+			if len(matches) == 0:
+				self.message_type = "UNKNOWN"
+				self.message_data = raw
+
+			else:
+				self.message_type = matches.keys()[0]
+				self.message_data = matches.values()[0]
 
 		self.raw = raw
 		self.connection = connection
@@ -192,19 +204,21 @@ class IRCConnection(object):
 				raw += self.socket.recv(2048)
 
 			except skt.error:
-				sleep(0.15)
+				self._out()
 				continue
 
-			print raw
+			if raw == "":
+				self._out()
+				continue
 
-			lines = [y for y in raw.splitlines() if y != ""]
+			lines = [y for y in raw.split("\r\n") if y != ""]
 			raw = lines[-1]
-			result = lines[:-1]
+			res = lines[:-1]
 
-			for l in lines:
+			for l in res:
 				l = l.decode("utf-8")
 
-				log(self.connector.logfile, "<< {}".format(l))
+				log(self.connector.logfile, "<< {}".format(l.encode("utf-8")))
 
 				if l.startswith("PING "):
 					self.socket.sendall("PONG " + " ".join(l.split(" ")[1:]))
@@ -212,16 +226,19 @@ class IRCConnection(object):
 				for f in self.receivers:
 					self.received.append(IRCMessage(l, self))
 
-					f(self, l)
+					threading.Thread(target=f, args=(self, l)).start()
 
-			try:
-				r = self.out_queue.get().encode("utf-8")
-				log(self.connector.logfile, ">> {}".format(r))
-				self.socket.sendall(r)
-				sleep(0.8)
+			self._out()
 
-			except Empty:
-				sleep(0.3)
+	def _out(self):
+		try:
+			r = self.out_queue.get_nowait().encode("utf-8")
+			log(self.connector.logfile, ">> {}".format(r))
+			self.socket.sendall(r)
+			sleep(0.8)
+
+		except Empty:
+			sleep(0.15)
 
 	def get_perm(host):
 		perms = self.permissions.copy()
@@ -241,18 +258,21 @@ class IRCConnection(object):
 			def __wrapper__(connection, raw):
 				msg = IRCMessage(raw)
 
-				if not re.match(regex, raw):
+				match = re.match(regex, raw)
+
+				if match is None:
 					return False
 
 				if msg.message_type == "PRIVMSG":
-					host = "{}!{}@{}".format(*msg.groups[0:2])
+					host = "{}!{}@{}".format(*msg.message_data[0:2])
 
 					if self.get_perm(host) < permission_level:
 						self.connector.no_perm(msg)
 						return False
 
-				result = func(IRCMessage(self, raw))
+				result = func(IRCMessage(connection, raw, match.groups()))
 				self.send_command(result)
+
 				return True
 
 			self.receivers.append(__wrapper__)
@@ -598,9 +618,9 @@ class IRCConnector(object):
 					return False
 
 				if msg.message_type == "PRIVMSG":
-					host = "{}!{}@{}".format(*msg.groups[0:2])
+					host = "{}!{}@{}".format(*msg.message_data[0:2])
 
-					if get_perm(host) < permission_level:
+					if self.get_perm(host) < permission_level:
 						self.no_perm(msg)
 						return False
 

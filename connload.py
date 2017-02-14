@@ -34,8 +34,8 @@ if __name__ == "__main__":
 
     @c.global_receiver(regex="[^ ]+ PRIVMSG ##lazy-valoran \\:\\|\\;reverse (.+)")
     def reverse_string(connection, message, custom_groups):
-        connection.send_command("PRIVMSG ##lazy-valoran :{}: {}".format(message.groups[0], custom_groups[0]))
+        connection.send_command("PRIVMSG ##lazy-valoran :{}: {}".format(message.message_data[0], custom_groups[0]))
 
     @c.global_receiver(regex="[^ ]+ PRIVMSG ##lazy-valoran \\:\\|\\;reverse$")
     def reverse_string_noargs(connection, message, custom_groups):
-        connection.send_command("PRIVMSG ##lazy-valoran :{}: Specify a string to reverse!".format(message.groups[0]))
+        connection.send_command("PRIVMSG ##lazy-valoran :{}: Specify a string to reverse!".format(message.message_data[0]))
