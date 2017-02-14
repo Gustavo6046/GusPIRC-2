@@ -1,0 +1,1 @@
+from guspirc.main import *
