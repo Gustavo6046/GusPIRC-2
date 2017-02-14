@@ -190,6 +190,13 @@ class IRCConnection(object):
 					self.received.append(msg)
 					f(msg, l)
 
+			try:
+				self.socket.sendall(self.out_queue.get())
+				time.sleep(0.8)
+
+			except Empty:
+				time.sleep(0.3)
+
 	def receiver(self, permission_level=0, regex=".+"):
 		"""
 		Decorator. Use this in functions you want to use
