@@ -3,6 +3,7 @@
 import socket as skt
 import ssl
 import re
+import threading
 
 from Queue import Empty
 from socket import SOCK_STREAM, socket, AF_INET, error
@@ -77,7 +78,7 @@ class IRCMessage(object):
 
 	Currently supported messages: KICK, PRIVMSG, BAN, NOTICE, NICK."""
 
-	def __init__(self, raw, connection):
+	def __init__(self, raw, connection=None):
 		try:
 			numeric = int(raw.split(" ")[1])
 
@@ -103,6 +104,7 @@ class IRCConnection(object):
 	"""A connection to IRC. Only usable within an IRCConnector."""
 
 	def __init__(
+		self,
 		connector,
 		socket,
 		master,
@@ -168,6 +170,14 @@ class IRCConnection(object):
 
 		self.permissions[hostmask] = level
 
+	def clear_queue(self):
+		"""
+		Clears the output queue from the connection, clearing all messages
+		the bot goes to output.
+
+		Useful to cancel a spammy command.
+		"""
+
 	def main_loop(self):
 		"""It's the main loop mentioned in the docs.
 
@@ -178,24 +188,48 @@ class IRCConnection(object):
 		raw = ""
 
 		while True:
-			raw += self.socket.read()
-			lines = [y for y in [x.strip("\r") for x in raw.split("\n")] if y != ""]
+			try:
+				raw += self.socket.recv(2048)
+
+			except skt.error:
+				sleep(0.15)
+				continue
+
+			print raw
+
+			lines = [y for y in raw.splitlines() if y != ""]
 			raw = lines[-1]
 			result = lines[:-1]
 
 			for l in lines:
-				for f in self.receivers:
-					msg = IRCMessage(l, self)
+				l = l.decode("utf-8")
 
-					self.received.append(msg)
-					f(msg, l)
+				log(self.connector.logfile, "<< {}".format(l))
+
+				if l.startswith("PING "):
+					self.socket.sendall("PONG " + " ".join(l.split(" ")[1:]))
+
+				for f in self.receivers:
+					self.received.append(IRCMessage(l, self))
+
+					f(self, l)
 
 			try:
-				self.socket.sendall(self.out_queue.get())
-				time.sleep(0.8)
+				r = self.out_queue.get().encode("utf-8")
+				log(self.connector.logfile, ">> {}".format(r))
+				self.socket.sendall(r)
+				sleep(0.8)
 
 			except Empty:
-				time.sleep(0.3)
+				sleep(0.3)
+
+	def get_perm(host):
+		perms = self.permissions.copy()
+		perms.update(self.connector.global_permissions)
+
+		possibles = [y for x, y in perms if re.match(x, host)]
+
+		return max(possibles)
 
 	def receiver(self, permission_level=0, regex=".+"):
 		"""
@@ -204,8 +238,28 @@ class IRCConnection(object):
 		"""
 
 		def __decorator__(func):
-			def __wrapper__(raw):
-				self.receivers.append(__wrapper__)
+			def __wrapper__(connection, raw):
+				msg = IRCMessage(raw)
+
+				if not re.match(regex, raw):
+					return False
+
+				if msg.message_type == "PRIVMSG":
+					host = "{}!{}@{}".format(*msg.groups[0:2])
+
+					if self.get_perm(host) < permission_level:
+						self.connector.no_perm(msg)
+						return False
+
+				result = func(IRCMessage(self, raw))
+				self.send_command(result)
+				return True
+
+			self.receivers.append(__wrapper__)
+
+			return __wrapper__
+
+		return __decorator__
 
 	def send_command(self, cmd):
 		"""
@@ -221,7 +275,7 @@ class IRCConnection(object):
 		if cmd.endswith("\r\n"):
 			self.out_queue.put(cmd)
 
-		elif cmd.endswith("\n")
+		elif cmd.endswith("\n"):
 			self.out_queue.put("{}\r\n".format(cmd[:-2]).encode("utf-8"))
 
 		else:
@@ -275,24 +329,17 @@ class IRCConnector(object):
 	connections quick and easy. Just use the add_connection_socket() function!"""
 
 	def __init__(self):
-		"""Are you really willing to call this?
-
-		I though this was called automatically when you started the
-		class variable!"""
-
 		self.connections = []
-
 		self.logfile = open("log.txt", "a", encoding="utf-8")
-
-		for x in self.loopthreads:
-			x.start()
-
 		self.message_handlers = []
+		self.global_permissions = {}
+		self.no_perm_handlers = []
+		self.name_connections = {}
 
 	def add_connection_socket(self,
 							  server,
 							  port=6697,
-							  ident="GusPIRC",
+							  ident="GusPIRC2",
 							  real_name="A GusPIRC Bot",
 							  nickname="GusPIRC Bot",
 							  password="",
@@ -300,10 +347,11 @@ class IRCConnector(object):
 							  account_name="",
 							  has_account=False,
 							  channels=None,
-							  auth_numeric=267,
+							  auth_numeric=376,
 							  use_ssl=True,
-							  master=""
-							  ):
+							  master="",
+							  master_perm=250,
+	):
 		"""Adds a IRC connection.
 
 		Only call this ONCE PER SERVER! For multiple channels give a
@@ -507,9 +555,72 @@ class IRCConnector(object):
 			server_host=server,
 			port=port,
 			real_name=real_name,
-			channels=channels
+			channels=channels,
 		))
 
 		log(self.logfile, u"Added to connections!")
+		self.global_permissions[master] = master_perm
 
 		return True
+
+	def get_perm(host):
+		possibles = [y for x, y in self.global_permissions if re.match(x, host)]
+
+		return max(possibles)
+
+	def no_perm(self, message):
+		for f in self.no_perm_handlers:
+			f(message)
+
+	def access_deny_broadcast(self, function):
+		"""
+		Decorator. Use this in functions you want to use
+		to handle denied access attempts by users.
+		"""
+		self.no_perm_handlers.apend(function)
+
+		return function
+
+	def global_receiver(self, permission_level=0, regex=".+"):
+		"""
+		Decorator. Use this in functions you want to use
+		to handle incoming messages! Available from all
+		connections.
+		"""
+
+		def __decorator__(func):
+			def __wrapper__(connection, raw):
+				msg = IRCMessage(raw)
+
+				match = re.match(regex, raw)
+
+				if match is None:
+					return False
+
+				if msg.message_type == "PRIVMSG":
+					host = "{}!{}@{}".format(*msg.groups[0:2])
+
+					if get_perm(host) < permission_level:
+						self.no_perm(msg)
+						return False
+
+				result = func(IRCMessage(connection, raw, match.groups()))
+				connection.send_command(result)
+
+				return True
+
+			for c in self.connections:
+				c.receivers.append(__wrapper__)
+
+			return __wrapper__
+
+		return __decorator__
+
+	def change_global_perm(self, hostmask, level):
+		"""Changes the global permission level for a hostmask.
+
+		During permission tests of an user, all hostmasks are sorted, and the one
+		with the highest permission level is chosen to set the permission for the
+		user."""
+
+		self.permissions[hostmask] = level
