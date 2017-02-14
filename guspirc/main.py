@@ -71,7 +71,11 @@ class IRCChannel(object):
 
 class IRCMessage(object):
 	"""An IRC message. A flexible, high-level adaptation of GusBot2's
-	parsed message dicts."""
+	parsed message dicts. Due to it's flexibility and not being
+	command-specific you must get the groups yourself when gathering data
+	about PRIVMSG's.
+
+	Currently supported messages: KICK, PRIVMSG, BAN, NOTICE, NICK."""
 
 	def __init__(self, raw, connection):
 		try:
@@ -187,21 +191,46 @@ class IRCConnection(object):
 					f(msg, l)
 
 	def receiver(self, permission_level=0, regex=".+"):
+		"""
+		Decorator. Use this in functions you want to use
+		to handle incoming messages!
+		"""
+
 		def __decorator__(func):
 			def __wrapper__(raw):
 				self.receivers.append(__wrapper__)
 
 	def send_command(self, cmd):
+		"""
+		Sends a command to this connection.
+
+		It is automatically succeded by CRLF,
+		so you shouldn't worry with appending those
+		to your command!
+		"""
 		if type(cmd) is unicode:
 			cmd = cmd.encode("utf-8")
 
-		self.socket.sendall(cmd + "\r\n")
+		if cmd.endswith("\r\n"):
+			self.out_queue.put(cmd)
+
+		elif cmd.endswith("\n")
+			self.out_queue.put("{}\r\n".format(cmd[:-2]).encode("utf-8"))
+
+		else:
+			self.out_queue.put(cmd + "\r\n")
 
 
 log_handlers = []
 
 def add_log_handler(func):
+	"""
+	Adds a function that will handle every log message broadcast.
+
+	Is also usable as decorator.
+	"""
 	log_handlers.append(func)
+	return func
 
 def log(logfile, msg):
 	"""Logs msg to the log file.
@@ -232,7 +261,11 @@ class IRCConnector(object):
 	It must only be used once!
 
 	And it's __init__ won't connect to a server by itself. Use
-	add_connection_socket() function for this!"""
+	add_connection_socket() function for this!
+
+	(update v2.0) This is also just a way of organizing your
+	IRCConnections, but the advantage is making server
+	connections quick and easy. Just use the add_connection_socket() function!"""
 
 	def __init__(self):
 		"""Are you really willing to call this?
@@ -241,12 +274,8 @@ class IRCConnector(object):
 		class variable!"""
 
 		self.connections = []
-		self.loopthreads = []
 
 		self.logfile = open("log.txt", "a", encoding="utf-8")
-
-		for n in xrange(len(self.connections)):
-			self.loopthreads.append(Thread(target=self.main_loop, args=(n,)))
 
 		for x in self.loopthreads:
 			x.start()
