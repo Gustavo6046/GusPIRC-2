@@ -222,7 +222,7 @@ class IRCConnection(object):
 					log(self.connector.logfile, u"<< {}".format(ul))
 
 					if l.startswith("PING "):
-						self.socket.sendall("PONG " + " ".join(l.split(" ")[1:]))
+						self.out_queue.put("PONG {}\r\n".format(" ".join(l.split(" ")[1:])))
 
 					for f in self.receivers:
 						self.received.append(IRCMessage(ul, self))
@@ -272,14 +272,10 @@ class IRCConnection(object):
 				msg = IRCMessage(raw)
 
 				if case_insensitive:
-					r = regex.lower()
-					rl = raw.lower()
+					match = re.match(regex, raw, re.I)
 
 				else:
-					r = regex
-					rl = raw
-
-				match = re.match(r, rl)
+					match = re.match(regex, raw)
 
 				if match is None:
 					return False
@@ -667,14 +663,10 @@ class IRCConnector(object):
 				msg = IRCMessage(raw)
 
 				if case_insensitive:
-					r = regex.lower()
-					rl = raw.lower()
+					match = re.match(regex, raw, re.I)
 
 				else:
-					r = regex
-					rl = raw
-
-				match = re.match(r, rl)
+					match = re.match(regex, raw)
 
 				if not bool(match):
 					return False
@@ -685,7 +677,6 @@ class IRCConnector(object):
 					host = "{}!{}@{}".format(*msg.message_data[0:3])
 
 					p = connection.get_perm(host)
-					log(self.logfile, "{} permlevel is {}".format(host, p))
 
 					if p < permission_level:
 						self.no_perm(connection, msg)

@@ -27,6 +27,20 @@ def get_from_config(filename):
 
     return connector
 
+def keyboard_listener(auto_start=True):
+    def __decorator__(func):
+        def __wrapper__(key):
+            l = pynput.keyboard.Listener(on_press=func)
+
+            if auto_start:
+                l.start()
+
+            return l
+
+        return __wrapper__
+
+    return __decorator__
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         c = get_from_config("connections.cson")
@@ -34,23 +48,26 @@ if __name__ == "__main__":
     else:
         c = get_from_config(" ".join(sys.argv[1:]))
 
-    @c.global_receiver(regex="[^\\!]+\\![^\\@]+\\@[^ ]+ PRIVMSG #([^ ]+) :|;reverse (.+)")
+    @c.global_receiver(regex=":[^\\!]+\\![^\\@]+\\@[^ ]+ PRIVMSG #([^ ]+) :\\|;reverse( (.+))?")
     def reverse_string(connection, message, custom_groups):
-        r = custom_groups[1]
+        if custom_groups[1] == "":
+            return "PRIVMSG #{} :Syntax: reverse <string to reverse>"
+
+        r = custom_groups[2]
 
         if r is None:
             return
 
-        r.reverse()
+        return "PRIVMSG #{} :{}: {}".format(custom_groups[0], message.message_data[0], r[::-1])
 
-        return "PRIVMSG #{} :{}: {}".format(custom_groups[0], message.message_data[0], r)
+    @keyboard_listener()
+    def check_press(key):
+        if not hasattr(key, "char"):
+            return
 
-    @c.global_receiver(regex="[^!]+![^@]+@[^ ]+ PRIVMSG #([^ ]+) :|;reverse ?$")
-    def reverse_string_noargs(connection, message, custom_groups):
-        print message.message_data, message.message_type, message.raw
+        if key.char == "q":
+            pirc.log(logfile, "Stopping...")
+            pirc.raw_log.write("\n\n=========\n\n")
+            c.stop()
 
-        return "PRIVMSG #{} :ERROR: Specify a string to reverse!".format(custom_groups[0])
-
-
-
-    pynput.keyboard.Listener(on_press=check_press)
+    check_press()
