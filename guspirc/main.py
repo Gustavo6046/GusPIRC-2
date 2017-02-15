@@ -4,6 +4,7 @@ import socket as skt
 import ssl
 import re
 import threading
+import sys
 
 from Queue import Empty
 from socket import SOCK_STREAM, socket, AF_INET, error
@@ -125,7 +126,8 @@ class IRCConnection(object):
 		server_host,
 		port,
 		real_name,
-		channels
+		channels,
+		quit_message,
 	):
 		self.connector = connector
 		self.socket = socket
@@ -135,6 +137,7 @@ class IRCConnection(object):
 		self.server_host = server_host
 		self.port = port
 		self.real_name = real_name
+		self.quitmsg = quit_message
 
 		self.out_queue = IterableQueue()
 
@@ -199,40 +202,47 @@ class IRCConnection(object):
 
 		raw = ""
 
-		while True:
-			try:
-				raw += self.socket.recv(2048)
+		try:
+			while True:
+				try:
+					raw += self.socket.recv(2048)
 
-			except skt.error:
+				except skt.error:
+					self._out()
+					continue
+
+				self.connector.raw_log.write(raw.decode("utf-8"))
+
+				lines = raw.split("\r\n")
+				raw = lines[-1].encode("utf-8")
+				res = lines[:-1]
+
+				for l in res:
+					ul = l.decode("utf-8")
+					log(self.connector.logfile, u"<< {}".format(ul))
+
+					if l.startswith("PING "):
+						self.socket.sendall("PONG " + " ".join(l.split(" ")[1:]))
+
+					for f in self.receivers:
+						self.received.append(IRCMessage(ul, self))
+
+						threading.Thread(target=f, args=(self, ul)).start()
+
 				self._out()
-				continue
 
-			if raw == "":
-				self._out()
-				continue
+		except KeyboardInterrupt:
+			self.connector.raw_log.write(u"\n")
+			self.socket.sendall("QUIT :{}".format(self.quitmsg))
 
-			lines = [y for y in raw.split("\r\n") if y != ""]
-			raw = lines[-1]
-			res = lines[:-1]
-
-			for l in res:
-				l = l.decode("utf-8")
-
-				log(self.connector.logfile, "<< {}".format(l.encode("utf-8")))
-
-				if l.startswith("PING "):
-					self.socket.sendall("PONG " + " ".join(l.split(" ")[1:]))
-
-				for f in self.receivers:
-					self.received.append(IRCMessage(l, self))
-
-					threading.Thread(target=f, args=(self, l)).start()
-
-			self._out()
+			raise
 
 	def _out(self):
 		try:
-			r = self.out_queue.get_nowait().encode("utf-8")
+			r = self.out_queue.get_nowait()
+			if type(r) is unicode:
+				r = r.encode("utf-8")
+
 			log(self.connector.logfile, ">> {}".format(r))
 			self.socket.sendall(r)
 			sleep(0.8)
@@ -240,15 +250,18 @@ class IRCConnection(object):
 		except Empty:
 			sleep(0.15)
 
-	def get_perm(host):
+	def get_perm(self, host):
 		perms = self.permissions.copy()
 		perms.update(self.connector.global_permissions)
 
-		possibles = [y for x, y in perms if re.match(x, host)]
+		possibles = [y for x, y in perms.items() if re.match(x, host)]
+
+		if len(possibles) == 0:
+			return 0
 
 		return max(possibles)
 
-	def receiver(self, permission_level=0, regex=".+"):
+	def receiver(self, permission_level=0, regex=".+", case_insensitive=True):
 		"""
 		Decorator. Use this in functions you want to use
 		to handle incoming messages!
@@ -258,7 +271,15 @@ class IRCConnection(object):
 			def __wrapper__(connection, raw):
 				msg = IRCMessage(raw)
 
-				match = re.match(regex, raw)
+				if case_insensitive:
+					r = regex.lower()
+					rl = raw.lower()
+
+				else:
+					r = regex
+					rl = raw
+
+				match = re.match(r, rl)
 
 				if match is None:
 					return False
@@ -270,8 +291,11 @@ class IRCConnection(object):
 						self.connector.no_perm(msg)
 						return False
 
-				result = func(IRCMessage(connection, raw, match.groups()))
-				self.send_command(result)
+				print "Running command..."
+				result = func(connection, msg, match.groups())
+
+				if result:
+					connection.send_command(result)
 
 				return True
 
@@ -313,17 +337,25 @@ def add_log_handler(func):
 	log_handlers.append(func)
 	return func
 
+_LOGGING = False
+
 def log(logfile, msg):
 	"""Logs msg to the log file.
 
 	Reminder: msg must be a Unicode string!"""
+	global _LOGGING
+
+	while _LOGGING:
+		sleep(0.1)
+
+	_LOGGING = True
 	try:
 		msg = msg.encode('utf-8')
 
 	except (UnicodeDecodeError, UnicodeEncodeError):
 		pass
 
-	x = "[{0}]: {1}".format(strftime(u"%A %d - %X"), msg)
+	x = "[{0}]: {1}".format(strftime(u"%A %d %B %Y - %X"), msg)
 
 	print x
 
@@ -335,6 +367,8 @@ def log(logfile, msg):
 
 	for f in log_handlers:
 		f(msg)
+
+	_LOGGING = False
 
 class IRCConnector(object):
 	"""The main connector with the IRC world!
@@ -355,6 +389,15 @@ class IRCConnector(object):
 		self.global_permissions = {}
 		self.no_perm_handlers = []
 		self.name_connections = {}
+		self.raw_log = open("rlog.txt", "a", encoding="utf-8")
+
+	def stop(self):
+		"""
+		Ends the running of the IRC connector.
+		"""
+		for c in self.connections:
+			c.send_command("QUIT :{}".format(c.quitmsg))
+			del c
 
 	def add_connection_socket(self,
 							  server,
@@ -371,6 +414,7 @@ class IRCConnector(object):
 							  use_ssl=True,
 							  master="",
 							  master_perm=250,
+							  quit_message="Join the GusPIRC 2 bandwagon! https://github.com/Gustavo6046/GusPIRC-2",
 	):
 		"""Adds a IRC connection.
 
@@ -434,8 +478,14 @@ class IRCConnector(object):
 
 		Defaults to 267.
 
-		- master: the name of the admin of the bot. ToDo: add tuple instead of string
-		for multiple admins"""
+		- master: the hostmask of the admin of the bot.
+
+		- masterperm: the permission level of the admin. How much the admin needs is
+		relative to the average command permission level required. Remember that
+		you can also change the permission levels of other hostmasks!
+
+		- quitmsg: The quit message (for when the bot takes a KeyboardInterrupt).
+		"""
 
 		if not hasattr(channels, "__iter__"):
 			raise TypeError("channels == not iterable!")
@@ -576,6 +626,7 @@ class IRCConnector(object):
 			port=port,
 			real_name=real_name,
 			channels=channels,
+			quit_message=quit_message,
 		))
 
 		log(self.logfile, u"Added to connections!")
@@ -583,14 +634,17 @@ class IRCConnector(object):
 
 		return True
 
-	def get_perm(host):
-		possibles = [y for x, y in self.global_permissions if re.match(x, host)]
+	def get_perm(self, host):
+		possibles = [y for x, y in self.global_permissions.items() if re.match(x, host)]
+
+		if len(possibles) == 0:
+			return 0
 
 		return max(possibles)
 
-	def no_perm(self, message):
+	def no_perm(self, connection, message):
 		for f in self.no_perm_handlers:
-			f(message)
+			f(connection, message)
 
 	def access_deny_broadcast(self, function):
 		"""
@@ -601,7 +655,7 @@ class IRCConnector(object):
 
 		return function
 
-	def global_receiver(self, permission_level=0, regex=".+"):
+	def global_receiver(self, permission_level=0, regex=".+", case_insensitive=True):
 		"""
 		Decorator. Use this in functions you want to use
 		to handle incoming messages! Available from all
@@ -612,20 +666,36 @@ class IRCConnector(object):
 			def __wrapper__(connection, raw):
 				msg = IRCMessage(raw)
 
-				match = re.match(regex, raw)
+				if case_insensitive:
+					r = regex.lower()
+					rl = raw.lower()
 
-				if match is None:
+				else:
+					r = regex
+					rl = raw
+
+				match = re.match(r, rl)
+
+				if not bool(match):
 					return False
 
-				if msg.message_type == "PRIVMSG":
-					host = "{}!{}@{}".format(*msg.message_data[0:2])
+				log(self.logfile, "Found matching {} message: {}".format(func.__name__, raw))
 
-					if self.get_perm(host) < permission_level:
-						self.no_perm(msg)
+				if msg.message_type == "PRIVMSG":
+					host = "{}!{}@{}".format(*msg.message_data[0:3])
+
+					p = connection.get_perm(host)
+					log(self.logfile, "{} permlevel is {}".format(host, p))
+
+					if p < permission_level:
+						self.no_perm(connection, msg)
 						return False
 
-				result = func(IRCMessage(connection, raw, match.groups()))
-				connection.send_command(result)
+				log(self.logfile, "Running {}...".format(func.__name__))
+				result = func(connection, msg, match.groups())
+
+				if result:
+					connection.send_command(result)
 
 				return True
 
@@ -644,3 +714,10 @@ class IRCConnector(object):
 		user."""
 
 		self.permissions[hostmask] = level
+
+	def no_perm_handler(self):
+		def __decorator__(func):
+			self.no_perm_handlers.append(func)
+			return func
+
+		return __decorator__
