@@ -1,13 +1,16 @@
 import guspirc.main as pirc
 import cson
 import sys
-import pynput
+import threading
+import traceback
+import commands
+import importlib
 
-def get_from_config(filename):
-    connector = pirc.IRCConnector()
 
-    for c in cson.load(open(filename)):
-        connector.add_connection_socket(
+
+def load_from_config(connector, filename):
+    for c in data["servers"]:
+        threading.Thread(target=connector.add_connection_socket, args=(
             c["server"],
             c["port"],
             c.get("ident", "GusPIRC2"),
@@ -21,53 +24,86 @@ def get_from_config(filename):
             c.get("motd_end_numeric", 376),
             c.get("use_ssl", False),
             c.get("master", "None!None@None"),
-            c.get("masterperm", 250),
-            c.get("quit_message", "https://github.com/Gustavo6046/GusPIRC-2 for more info.")
-        )
+            c.get("masterperm", data.get("global_info", {}).get("master_perm", 250)),
+            c.get("quit_message", "https://github.com/Gustavo6046/GusPIRC-2 for more info."),
+        )).start()
 
     return connector
 
-def keyboard_listener(auto_start=True):
-    def __decorator__(func):
-        def __wrapper__(key):
-            l = pynput.keyboard.Listener(on_press=func)
+def get_from_config(filename):
+    data = cson.load(open(filename))
 
-            if auto_start:
-                l.start()
+    connector = pirc.IRCConnector(data.get("global_info", {}).get("master_name", "__DefaultMaster__"), data.get("global_info", {}).get("command_prefix", "|;"))
 
-            return l
+    for c in data["servers"]:
+        threading.Thread(target=connector.add_connection_socket, args=(
+            c["server"],
+            c["port"],
+            c.get("ident", "GusPIRC2"),
+            c.get("realname", "Happy for being ran in GusPIRC 2. C:"),
+            c["nickname"],
+            c.get("password", ""),
+            c.get("email", ""),
+            c.get("account_name", ""),
+            c.get("has_account", True),
+            c.get("channels", []),
+            c.get("motd_end_numeric", 376),
+            c.get("use_ssl", False),
+            c.get("master", "None!None@None"),
+            c.get("masterperm", data.get("global_info", {}).get("master_perm", 250)),
+            c.get("quit_message", "https://github.com/Gustavo6046/GusPIRC-2 for more info."),
+        )).start()
 
-        return __wrapper__
+    return connector
 
-    return __decorator__
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        c = get_from_config("connections.cson")
+        data = cson.load(open("connections.cson"))
 
     else:
-        c = get_from_config(" ".join(sys.argv[1:]))
+        data = cson.load(open(" ".join(sys.argv[1:])))
 
-    @c.global_receiver(regex=":[^\\!]+\\![^\\@]+\\@[^ ]+ PRIVMSG #([^ ]+) :\\|;reverse( (.+))?")
-    def reverse_string(connection, message, custom_groups):
-        if custom_groups[1] == "":
-            return "PRIVMSG #{} :Syntax: reverse <string to reverse>"
+    c = pirc.IRCConnector(data.get("global_info", {}).get("master_name", "__DefaultMaster__"), data.get("global_info", {}).get("command_prefix", "|;"))
 
-        r = custom_groups[2]
+    # Commands
+    try:
+        print "Loading commands..."
+        commands.define_commands(c)
+        print "Commands finished loading!"
 
-        if r is None:
-            return
+    except BaseException as err:
+        del c
+        raise
 
-        return "PRIVMSG #{} :{}: {}".format(custom_groups[0], message.message_data[0], r[::-1])
+    # Connect!
+    if len(sys.argv) < 2:
+        load_from_config(c, "connections.cson")
 
-    @keyboard_listener()
-    def check_press(key):
-        if not hasattr(key, "char"):
-            return
+    else:
+        load_from_config(c, " ".join(sys.argv[1:]))
 
-        if key.char == "q":
-            pirc.log(logfile, "Stopping...")
-            pirc.raw_log.write("\n\n=========\n\n")
-            c.stop()
+    @c.no_perm_handler()
+    def no_permission(connection, message, needed, func):
+        if (not hasattr(func, "cmd_name")) or re.match(func.full_regex, message.raw):
+            host = "{}!{}@{}".format(*message.message_data[:3])
+            connection.send_command("PRIVMSG {} :{}: No permission to execute that command ('{}'; You need {}, but you have {})!".format(message.message_data[3], message.message_data[0], message.message_data[-1], needed, connection.get_perm(host)))
 
-    check_press()
+def reload_commands(c):
+    try:
+        global commands
+        commands = reload(commands)
+
+    except BaseException as err:
+        return err
+
+    else:
+        try:
+            commands.define_commands(c)
+
+        except BaseException as err:
+            return err
+
+        c.clear_all_receivers()
+        commands.define_commands(c)
+        return None
