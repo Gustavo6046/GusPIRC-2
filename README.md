@@ -1,5 +1,5 @@
 # GusPIRC 2
-The sequel to the famous IRC interface that GusBot2 runs in, now with a higher level!
+The sequel to the IRC interface that GusBot2 runs in, now with a higher level!
 
 ## What is GusPIRC 2?
 GusPIRC 2 is an IRC (and, to some extent, general communication automation) library designed to be powerful, not focusing on
